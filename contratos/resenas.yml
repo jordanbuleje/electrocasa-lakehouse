@@ -1,0 +1,131 @@
+# Contrato de datos: Reseñas
+# Coincide con src/electrocasa/transformations/silver/silver_resenas_tracking.py
+# y REGLAS["resenas"] de utils/calidad.py.
+
+fuente: resenas
+version: 1
+ultima_actualizacion: "2026-11-22"
+responsable: "atencion_al_cliente"
+llegada: "Archivos JSON Lines (un objeto por línea), un archivo por lote, en /Volumes/<catalogo>/default/vol_landing/resenas/"
+metodo_ingesta: >-
+  Auto Loader dentro del pipeline (Streaming Table), con schema explícito para los campos
+  anidados. Llega por lotes incrementales y es semi-estructurado; Auto Loader con
+  rescuedDataColumn guarda en _rescued_data cualquier campo inesperado sin romper la carga.
+frecuencia_esperada: "trimestral (lotes al 31 de julio y al 31 de octubre de 2026)"
+tabla_bronze: "<catalogo>.bronze.resenas"
+tabla_silver: "<catalogo>.silver.resenas"
+llave: "resena_id"
+
+columnas:
+  - nombre: resena_id
+    tipo: string
+    nulo: false
+  - nombre: producto_id
+    tipo: string
+    nulo: false
+    regla: >-
+      Tiene que existir en silver.catalogo. Si no existe, la reseña se descarta a
+      silver.cuarentena: la pregunta 5 no puede asignarle categoría y el enunciado pide
+      que no entre ni en el numerador ni en el denominador.
+  - nombre: cliente_id
+    tipo: string
+    nulo: true
+  - nombre: calificacion
+    tipo: int
+    nulo: false
+    regla: "entre 1 y 5"
+  - nombre: comentario
+    tipo: string
+    nulo: true
+  - nombre: tags
+    tipo: array<string>
+    nulo: false
+    regla: "null -> arreglo vacío"
+  - nombre: respuestas
+    tipo: array<struct<autor:string,texto:string,fecha:string>>
+    nulo: false
+    regla: "null -> arreglo vacío; autor nulo -> 'no_informado'"
+  - nombre: fecha_resena
+    tipo: date
+    nulo: false
+  - nombre: origen
+    tipo: string
+    nulo: true
+    regla: "derivada: metadata.origen (app, web, kiosko)"
+  - nombre: metadata
+    tipo: string
+    nulo: true
+    regla: "texto JSON; su estructura cambia según el origen (app: version/so; web: navegador; kiosko: kiosko_id/sucursal_id; campañas)"
+
+reglas_de_calidad:
+  - nombre: calificacion_en_escala
+    condicion: "calificacion IS NOT NULL AND calificacion BETWEEN 1 AND 5"
+    politica: drop
+    destino_rechazos: "silver.cuarentena (fuente = 'resenas', politica = 'drop')"
+    justificacion: >-
+      La pregunta 5 cuenta reseñas negativas (1 o 2) sobre el total; una calificación 0, 6 o
+      nula no se puede clasificar y el enunciado la excluye. Son pocas filas, no justifica fail.
+  - nombre: producto_en_catalogo
+    condicion: "producto_en_catalogo"
+    politica: drop
+    destino_rechazos: "silver.cuarentena"
+    justificacion: "Sin producto no hay categoría para la pregunta 5 (el enunciado la excluye del cálculo)."
+  - nombre: fecha_valida
+    condicion: "fecha_resena IS NOT NULL"
+    politica: drop
+    destino_rechazos: "silver.cuarentena"
+    justificacion: "Sin fecha la reseña no cae en ningún mes."
+  - nombre: resena_id_informado
+    condicion: "resena_id IS NOT NULL"
+    politica: drop
+    destino_rechazos: "silver.cuarentena"
+    justificacion: "Es la llave de deduplicación."
+  - nombre: comentario_informado
+    condicion: "comentario IS NOT NULL"
+    politica: warn
+    destino_rechazos: "silver.cuarentena (politica = 'warn')"
+    justificacion: "Una reseña sin texto sigue teniendo una calificación válida."
+
+transformaciones_silver:
+  - "calificacion: try_cast a int"
+  - "fecha_resena: acepta 'yyyy-MM-dd' y 'dd/MM/yyyy'"
+  - "comentario: trim; vacío -> NULL"
+  - "tags: NULL -> []"
+  - "respuestas: NULL -> []; autor NULL -> 'no_informado'"
+  - "origen = get_json_object(metadata, '$.origen')"
+  - "deduplicación por resena_id (las reseñas del lote 1 repetidas en el lote 2 son idénticas)"
+  - "join con silver.catalogo para marcar producto_en_catalogo"
+
+problemas_conocidos:
+  - problema: "calificacion fuera de la escala"
+    ejemplo: "6, 0, null"
+    filas_afectadas: "38 con 6, 28 con 0, 37 nulas"
+    tratamiento: "regla calificacion_en_escala (drop)"
+  - problema: "comentario nulo o vacío"
+    ejemplo: "comentario = '' o null"
+    filas_afectadas: "114"
+    tratamiento: "NULL + regla comentario_informado (warn)"
+  - problema: "tags nulo en vez de arreglo vacío"
+    ejemplo: "tags = null"
+    filas_afectadas: "89"
+    tratamiento: "coalesce a []"
+  - problema: "respuestas sin autor"
+    ejemplo: "{autor: null, texto: ..., fecha: ...}"
+    filas_afectadas: "8 respuestas"
+    tratamiento: "autor -> 'no_informado'"
+  - problema: "producto_id que no existe en el catálogo"
+    ejemplo: "producto_id fuera del maestro"
+    filas_afectadas: "113"
+    tratamiento: "regla producto_en_catalogo (drop)"
+  - problema: "fecha_resena en dos formatos"
+    ejemplo: "'2026-07-14' y '14/04/2026'"
+    filas_afectadas: "80 en dd/MM/yyyy"
+    tratamiento: "fecha_flexible()"
+  - problema: "reseñas del lote 1 repetidas en el lote 2"
+    ejemplo: "mismo resena_id en los dos archivos, contenido idéntico"
+    filas_afectadas: "80"
+    tratamiento: "deduplicación por resena_id"
+  - problema: "metadata con estructura variable según el origen"
+    ejemplo: "{origen: app, app: {version, so}} / {origen: web, navegador} / {origen: kiosko, kiosko_id, sucursal_id}"
+    filas_afectadas: "todas (4 formas distintas)"
+    tratamiento: "se guarda como texto JSON; se extrae origen"

@@ -1,0 +1,158 @@
+# Contrato de datos: Empleados (RR.HH.)
+# Coincide con src/electrocasa/transformations/silver/silver_empleados.py
+# y con REGLAS["empleados"] de src/electrocasa/utils/calidad.py.
+
+fuente: empleados
+version: 1
+ultima_actualizacion: "2026-11-22"
+responsable: "recursos_humanos"
+llegada: "Archivos CSV con encabezado, un archivo por lote de eventos, en /Volumes/<catalogo>/default/vol_landing/empleados/"
+metodo_ingesta: >-
+  Auto Loader dentro del pipeline (Streaming Table). Cada lote trae eventos nuevos,
+  incluidos eventos tardíos de meses anteriores: Bronze solo agrega, y la historia se
+  recalcula en Silver.
+frecuencia_esperada: "mensual (lotes de eventos al cierre de mayo, agosto y octubre de 2026)"
+tabla_bronze: "<catalogo>.bronze.empleados"
+tabla_silver: "<catalogo>.silver.empleados (historia SCD2) y <catalogo>.silver.empleados_eventos (eventos limpios)"
+llave_evento: "id_empleado + tipo_evento + fecha_evento + fecha_registro"
+llave_entidad: "id_empleado (una fila por versión en silver.empleados: id_empleado + version)"
+historizacion:
+  tipo: SCD Type 2
+  implementacion: >-
+    Intervalos armados a mano en una Materialized View: lead(fecha_evento) sobre una ventana
+    por id_empleado ordenada por (fecha_evento, fecha_registro). Cada evento que no es baja
+    abre una versión; la siguiente fecha de evento la cierra; una baja cierra la versión
+    anterior y no abre otra.
+  columnas_de_vigencia: ["valido_desde", "valido_hasta", "es_vigente"]
+  orden_de_los_cambios: "fecha_evento y, para desempatar, fecha_registro (nunca current_timestamp())"
+  eventos_mismo_dia: >-
+    Se ordenan por fecha_registro (cuándo los cargó RR.HH.). Ej.: alta y cambio_salario el
+    mismo día: el alta queda con intervalo [d, d) (vacío) y vale el cambio de salario.
+  llegada_tardia: >-
+    Un evento de junio que llega en el lote de octubre se agrega a Bronze y, como Silver es
+    una Materialized View que recalcula la historia con todos los eventos, queda en su lugar
+    por fecha_evento y corta la versión que antes seguía abierta.
+
+columnas:
+  - nombre: id_empleado
+    tipo: string
+    nulo: false
+  - nombre: nombre
+    tipo: string
+    nulo: true
+  - nombre: dni
+    tipo: string
+    nulo: true
+    sensible: true
+    masking: >-
+      <catalogo>.silver.mascara_dni: is_account_group_member('electrocasa_ingenieria') ve el
+      valor real; el resto ve '*****' + los últimos 3 dígitos. Declarada con MASK en el schema
+      de silver.empleados_eventos, silver.empleados y gold.empleados_vigentes.
+  - nombre: email
+    tipo: string
+    nulo: true
+  - nombre: salario
+    tipo: decimal(10,2)
+    nulo: true
+    regla: "entre 900 y 20000; fuera de rango se anula (salario_fuera_de_rango = true) y el evento se conserva"
+    sensible: true
+    masking: "<catalogo>.silver.mascara_salario: solo electrocasa_ingenieria ve el valor; el resto ve NULL"
+  - nombre: sucursal_id
+    tipo: string
+    nulo: false
+  - nombre: cargo
+    tipo: string
+    nulo: true
+  - nombre: tipo_evento
+    tipo: string
+    nulo: false
+    valores_permitidos: ["alta", "transferencia", "cambio_salario", "baja"]
+  - nombre: fecha_evento
+    tipo: date
+    nulo: false
+  - nombre: fecha_registro
+    tipo: timestamp
+    nulo: false
+  - nombre: dni_duplicado
+    tipo: boolean
+    nulo: false
+    regla: "derivada: true si el mismo dni aparece en más de un id_empleado"
+  - nombre: salario_fuera_de_rango
+    tipo: boolean
+    nulo: false
+
+reglas_de_calidad:
+  - nombre: evento_ubicable
+    condicion: "id_empleado IS NOT NULL AND fecha_evento IS NOT NULL"
+    politica: drop
+    destino_rechazos: "silver.cuarentena (fuente = 'empleados', politica = 'drop')"
+    justificacion: >-
+      Sin id o sin fecha el evento no se puede ubicar en la historia. No es fail porque
+      son 38 filas de 4.448 y frenar todo el pipeline dejaría sin actualizar las demás fuentes.
+      Declarar NOT NULL en el schema no frena una llave nula: por eso la expectativa.
+  - nombre: tipo_evento_conocido
+    condicion: "tipo_evento IS NOT NULL"
+    politica: drop
+    destino_rechazos: "silver.cuarentena"
+    justificacion: "Un tipo desconocido no se sabe si abre o cierra una versión."
+  - nombre: sucursal_informada
+    condicion: "sucursal_id IS NOT NULL"
+    politica: drop
+    destino_rechazos: "silver.cuarentena"
+    justificacion: "La sucursal es justo lo que miden las preguntas 3 y 4."
+  - nombre: dni_informado
+    condicion: "dni IS NOT NULL"
+    politica: warn
+    destino_rechazos: "silver.cuarentena (politica = 'warn')"
+    justificacion: "El dni no participa en ninguna pregunta de negocio; el evento sigue siendo válido."
+  - nombre: dni_unico
+    condicion: "NOT dni_duplicado"
+    politica: warn
+    destino_rechazos: "silver.cuarentena (politica = 'warn')"
+    justificacion: >-
+      Mismo dni en dos empleados distintos = error de digitación. Son dos personas con id
+      propio y eventos propios: se conservan las dos y se marca el dni para que RR.HH. lo corrija.
+  - nombre: salario_en_rango
+    condicion: "NOT salario_fuera_de_rango"
+    politica: warn
+    destino_rechazos: "silver.cuarentena (politica = 'warn')"
+    justificacion: "El salario no se usa en las preguntas; se anula el valor y el evento sigue sirviendo para dotación."
+
+transformaciones_silver:
+  - "tipo_evento: minúsculas, sin tildes, espacios/'_' unificados y mapa de 13 escrituras a 4 valores ('cese' -> 'baja')"
+  - "fecha_evento -> date (try_to_date); fecha_registro -> timestamp"
+  - "salario -> decimal(10,2); fuera de [900, 20000] -> NULL con salario_fuera_de_rango = true"
+  - "dni vacío -> NULL; dni_duplicado por ventana sobre dni"
+  - "nombre con initcap; email en minúsculas"
+  - "deduplicación de eventos idénticos por (id_empleado, tipo_evento, fecha_evento, fecha_registro)"
+  - "historia SCD2 en silver.empleados (ver historizacion)"
+
+problemas_conocidos:
+  - problema: "tipo_evento con 13 escrituras, incluido 'cese' como sinónimo de baja"
+    ejemplo: "'Cambio Salario', 'CAMBIO_SALARIO', 'ALTA', 'cese', 'BAJA'"
+    filas_afectadas: "todas (4.448)"
+    tratamiento: "mapa TIPOS_EVENTO"
+  - problema: "dos eventos del mismo empleado el mismo día"
+    ejemplo: "alta y cambio_salario con la misma fecha_evento; fecha_registro 10:30 y 16:51"
+    filas_afectadas: "38 pares (id_empleado, fecha_evento)"
+    tratamiento: "orden por (fecha_evento, fecha_registro)"
+  - problema: "eventos de junio a agosto registrados recién en octubre (llegada tardía)"
+    ejemplo: "EMP-01171, transferencia del 2026-08-02 registrada el 2026-10-10, llega en el lote 3"
+    filas_afectadas: "63"
+    tratamiento: "Silver recalcula los intervalos con todos los eventos"
+  - problema: "dni vacío"
+    ejemplo: "dni = ''"
+    filas_afectadas: "58"
+    tratamiento: "regla dni_informado (warn)"
+  - problema: "mismo dni en dos empleados distintos"
+    ejemplo: "dni 28147179 en EMP-00557 y EMP-01077"
+    filas_afectadas: "6 dni"
+    tratamiento: "regla dni_unico (warn); se conservan ambos empleados"
+  - problema: "fecha_evento vacía"
+    ejemplo: "EMP-01053, Alta, fecha_evento = ''"
+    filas_afectadas: "38"
+    tratamiento: "regla evento_ubicable (drop)"
+  - problema: "salario con un orden de magnitud fuera de rango"
+    ejemplo: "246616.0 (rango normal 1.201,85 a 9.894,26), 10331.59"
+    filas_afectadas: "18 sobre 20.000 (anulados); los de 10.3k quedan dentro del rango"
+    tratamiento: "salario -> NULL + regla salario_en_rango (warn)"

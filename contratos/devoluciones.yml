@@ -1,0 +1,116 @@
+# Contrato de datos: Devoluciones
+# Coincide con src/electrocasa/transformations/silver/silver_ventas_devoluciones.py
+# y REGLAS["devoluciones"] de utils/calidad.py.
+
+fuente: devoluciones
+version: 1
+ultima_actualizacion: "2026-11-22"
+responsable: "atencion_al_cliente (postventa)"
+llegada: "Archivos CSV con encabezado, un archivo por lote, en /Volumes/<catalogo>/default/vol_landing/devoluciones/"
+metodo_ingesta: >-
+  Auto Loader dentro del pipeline (Streaming Table): llega por lotes incrementales, igual
+  que Ventas, y cada lote solo trae devoluciones nuevas (más algunas reingestas).
+frecuencia_esperada: "mensual (lotes al cierre de mayo, agosto y octubre de 2026)"
+tabla_bronze: "<catalogo>.bronze.devoluciones"
+tabla_silver: "<catalogo>.silver.devoluciones"
+llave: "devolucion_id"
+depende_de:
+  - fuente: ventas
+    columna: venta_id
+
+columnas:
+  - nombre: devolucion_id
+    tipo: string
+    nulo: false
+  - nombre: venta_id
+    tipo: string
+    nulo: false
+    regla: >-
+      Tiene que existir en silver.ventas. Si viene vacía o no existe, la devolución se
+      descarta a silver.cuarentena: sin la venta de origen no se puede comprobar que el
+      reembolso no supere el monto vendido.
+  - nombre: sucursal_id
+    tipo: string
+    nulo: false
+  - nombre: producto_id
+    tipo: string
+    nulo: false
+  - nombre: motivo
+    tipo: string
+    nulo: false
+    regla: "vacío -> 'no_informado'"
+  - nombre: monto_reembolso
+    tipo: decimal(12,2)
+    nulo: false
+    regla: "entre 0 y el monto_total de la venta de origen"
+  - nombre: monto_venta
+    tipo: decimal(12,2)
+    nulo: false
+    regla: "derivada del join con silver.ventas"
+  - nombre: fecha_devolucion
+    tipo: date
+    nulo: false
+
+reglas_de_calidad:
+  - nombre: reembolso_valido
+    condicion: "monto_reembolso IS NOT NULL AND monto_venta IS NOT NULL AND monto_reembolso >= 0 AND monto_reembolso <= monto_venta"
+    politica: drop
+    destino_rechazos: "silver.cuarentena (fuente = 'devoluciones', politica = 'drop')"
+    justificacion: >-
+      El reembolso se resta de las ventas (pregunta 1): uno negativo inflaría las ventas
+      netas y uno mayor que la venta las haría negativas sin sentido. La regla compara dos
+      columnas de la MISMA fila porque el join con Ventas se hace antes, en la vista
+      devoluciones_preparadas.
+  - nombre: venta_existe
+    condicion: "monto_venta IS NOT NULL"
+    politica: drop
+    destino_rechazos: "silver.cuarentena"
+    justificacion: "Devolución huérfana: no se puede validar el reembolso (ver regla de venta_id)."
+  - nombre: fecha_valida
+    condicion: "fecha_devolucion IS NOT NULL"
+    politica: drop
+    destino_rechazos: "silver.cuarentena"
+    justificacion: "Sin fecha no cae en ningún mes."
+  - nombre: devolucion_id_informado
+    condicion: "devolucion_id IS NOT NULL"
+    politica: drop
+    destino_rechazos: "silver.cuarentena"
+    justificacion: "Es la llave de deduplicación."
+  - nombre: motivo_informado
+    condicion: "motivo <> 'no_informado'"
+    politica: warn
+    destino_rechazos: "silver.cuarentena (politica = 'warn')"
+    justificacion: "El motivo no se usa en las preguntas; la devolución sigue siendo válida."
+
+transformaciones_silver:
+  - "monto_reembolso: misma normalización decimal que Ventas; try_cast a decimal(12,2)"
+  - "fecha_devolucion -> date"
+  - "motivo vacío -> 'no_informado'"
+  - "deduplicación por devolucion_id (las repetidas del lote anterior son idénticas)"
+  - "left join con silver.ventas para traer monto_venta"
+
+problemas_conocidos:
+  - problema: "monto_reembolso negativo"
+    ejemplo: "-1125.95"
+    filas_afectadas: "38"
+    tratamiento: "regla reembolso_valido (drop)"
+  - problema: "monto_reembolso mayor que el monto de la venta de origen"
+    ejemplo: "reembolso de 12.345,00 sobre una venta de 4.000,00"
+    filas_afectadas: "83 (contra las ventas de Bronze)"
+    tratamiento: "regla reembolso_valido (drop)"
+  - problema: "venta_id vacío"
+    ejemplo: "venta_id = ''"
+    filas_afectadas: "35"
+    tratamiento: "regla venta_existe (drop)"
+  - problema: "venta_id que no existe en ventas"
+    ejemplo: "venta fuera de los tres lotes de ventas"
+    filas_afectadas: "30 (más las que apuntan a ventas rechazadas en Silver)"
+    tratamiento: "regla venta_existe (drop)"
+  - problema: "motivo vacío"
+    ejemplo: "motivo = ''"
+    filas_afectadas: "71"
+    tratamiento: "'no_informado' + regla motivo_informado (warn)"
+  - problema: "devoluciones del lote anterior repetidas"
+    ejemplo: "mismo devolucion_id en dos lotes, idénticas"
+    filas_afectadas: "60"
+    tratamiento: "deduplicación por devolucion_id"

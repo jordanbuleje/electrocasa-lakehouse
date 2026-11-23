@@ -1,0 +1,153 @@
+# Contrato de datos: Ventas
+# Coincide con src/electrocasa/transformations/silver/silver_ventas_devoluciones.py
+# y con las reglas REGLAS["ventas"] de src/electrocasa/utils/calidad.py.
+
+fuente: ventas
+version: 1
+ultima_actualizacion: "2026-11-22"
+responsable: "area_comercial"
+llegada: "Archivos CSV con encabezado, un archivo por lote, en /Volumes/<catalogo>/default/vol_landing/ventas/"
+metodo_ingesta: >-
+  Auto Loader (cloudFiles) dentro del pipeline, en una Streaming Table. Llega por lotes
+  incrementales (cada archivo trae ventas nuevas), es la fuente de mayor volumen
+  (~18 mil filas en 3 lotes, creciendo cada mes) y Auto Loader recuerda qué archivos ya
+  leyó sin que tengamos que manejar el checkpoint.
+frecuencia_esperada: "mensual (lotes al cierre de mayo, agosto y octubre de 2026)"
+tabla_bronze: "<catalogo>.bronze.ventas"
+tabla_silver: "<catalogo>.silver.ventas"
+llave: "venta_id"
+
+columnas:
+  - nombre: venta_id
+    tipo: string
+    nulo: false
+  - nombre: sucursal_id
+    tipo: string
+    nulo: false
+    regla: "obligatoria; en ecommerce es la sucursal que despachó"
+  - nombre: producto_id
+    tipo: string
+    nulo: false
+    regla: >-
+      Si el producto no existe en silver.catalogo la venta SE CONSERVA (el dinero entró
+      y cuenta en ventas netas) con producto_en_catalogo = false y una advertencia en
+      silver.cuarentena (politica warn). En los rankings de productos aparece sin nombre.
+  - nombre: vendedor_id
+    tipo: string
+    nulo: true
+    regla: "vacío en todas las ventas de ecommerce; informado en todas las de tienda física"
+  - nombre: cantidad
+    tipo: int
+    nulo: false
+    regla: "mayor a 0"
+  - nombre: monto_total
+    tipo: decimal(12,2)
+    nulo: false
+    regla: "mayor a 0, después de normalizar coma decimal y punto de miles"
+  - nombre: metodo_pago
+    tipo: string
+    nulo: false
+    valores_permitidos: ["tarjeta", "efectivo", "yape", "plin", "transferencia"]
+  - nombre: fecha_venta
+    tipo: date
+    nulo: false
+  - nombre: canal
+    tipo: string
+    nulo: false
+    valores_permitidos: ["tienda_fisica", "ecommerce"]
+  - nombre: producto_en_catalogo
+    tipo: boolean
+    nulo: false
+    regla: "columna derivada: true si producto_id existe en silver.catalogo"
+
+reglas_de_calidad:
+  - nombre: monto_positivo
+    condicion: "monto_total IS NOT NULL AND monto_total > 0"
+    politica: drop
+    destino_rechazos: "silver.cuarentena (fuente = 'ventas', politica = 'drop')"
+    justificacion: >-
+      monto_total es la medida de las preguntas 1 y 4. Un monto vacío, cero o negativo
+      no es una venta válida y distorsionaría las ventas netas y el ticket promedio.
+      No es fail porque son pocas filas (~2%) y el resto del lote es confiable.
+  - nombre: cantidad_positiva
+    condicion: "cantidad IS NOT NULL AND cantidad > 0"
+    politica: drop
+    destino_rechazos: "silver.cuarentena"
+    justificacion: "La cantidad es la medida del top 10 por unidades; una venta con 0 unidades es inconsistente."
+  - nombre: sucursal_informada
+    condicion: "sucursal_id IS NOT NULL"
+    politica: drop
+    destino_rechazos: "silver.cuarentena"
+    justificacion: "Sin sucursal la venta no se puede asignar en la pregunta 1."
+  - nombre: fecha_valida
+    condicion: "fecha_venta IS NOT NULL"
+    politica: drop
+    destino_rechazos: "silver.cuarentena"
+    justificacion: "Sin fecha la venta no cae en ningún mes. Los tres formatos de origen se normalizan antes."
+  - nombre: venta_id_informado
+    condicion: "venta_id IS NOT NULL"
+    politica: drop
+    destino_rechazos: "silver.cuarentena"
+    justificacion: "Es la llave de deduplicación y la que referencian Devoluciones y Tracking."
+  - nombre: metodo_pago_conocido
+    condicion: "metodo_pago IS NOT NULL"
+    politica: drop
+    destino_rechazos: "silver.cuarentena"
+    justificacion: "Una escritura que no está en el mapa indica un valor nuevo en la fuente que hay que revisar antes de publicarlo."
+  - nombre: canal_conocido
+    condicion: "canal IS NOT NULL"
+    politica: drop
+    destino_rechazos: "silver.cuarentena"
+    justificacion: "La pregunta 4 filtra por canal = tienda_fisica."
+  - nombre: producto_en_catalogo
+    condicion: "producto_en_catalogo"
+    politica: warn
+    destino_rechazos: "silver.cuarentena (politica = 'warn'); la venta sí llega a Silver"
+    justificacion: "La venta existió y cuenta en ventas netas; solo le falta el dato maestro del producto."
+
+transformaciones_silver:
+  - "trim a todos los textos; texto vacío -> NULL"
+  - "monto_total: si trae coma, se quitan los puntos de miles y la coma pasa a punto ('1.234,50' -> 1234.50); try_cast a decimal(12,2)"
+  - "cantidad: try_cast a int"
+  - "fecha_venta: acepta 'yyyy-MM-dd', 'dd/MM/yyyy' y 'yyyy-MM-ddTHH:mm:ss' con try_to_date / try_to_timestamp (no falla con ANSI)"
+  - "metodo_pago: minúsculas, sin tildes, '_' y espacios unificados, y mapa de 17 escrituras a 5 valores (TC, td, tarjeta, Tarjeta de credito -> tarjeta; EFV -> efectivo; TRF -> transferencia)"
+  - "deduplicación por venta_id: se conserva la primera llegada (row_number por _fecha_ingesta, _archivo_origen)"
+  - "join con silver.catalogo para marcar producto_en_catalogo"
+
+problemas_conocidos:
+  - problema: "metodo_pago con 17 escrituras para 5 métodos"
+    ejemplo: "PLIN, Plin, YAPE, yape, TRF, EFV, TC, td, 'Tarjeta de credito'"
+    filas_afectadas: "todas (18.240 filas de Bronze)"
+    tratamiento: "mapa METODOS_PAGO en utils/normalizacion.py"
+  - problema: "monto_total con coma decimal y punto de miles"
+    ejemplo: "'3.468,69', '407,98'"
+    filas_afectadas: "244"
+    tratamiento: "normalización en monto_decimal()"
+  - problema: "monto_total vacío"
+    ejemplo: "''"
+    filas_afectadas: "152"
+    tratamiento: "regla monto_positivo (drop)"
+  - problema: "monto_total negativo o cero"
+    ejemplo: "'-1602.5', '0'"
+    filas_afectadas: "201"
+    tratamiento: "regla monto_positivo (drop)"
+  - problema: "cantidad en cero"
+    ejemplo: "cantidad = '0'"
+    filas_afectadas: "68"
+    tratamiento: "regla cantidad_positiva (drop)"
+  - problema: "sucursal_id vacío"
+    ejemplo: "sucursal_id = ''"
+    filas_afectadas: "105"
+    tratamiento: "regla sucursal_informada (drop)"
+  - problema: "fecha_venta en tres formatos"
+    ejemplo: "'2026-06-07', '07/06/2026', '2026-06-07T14:30:00'"
+    filas_afectadas: "2.140 en dd/MM/yyyy y 1.458 con hora"
+    tratamiento: "fecha_flexible()"
+  - problema: "producto_id inexistente en el catálogo"
+    ejemplo: "PRD-91567, PRD-94458"
+    filas_afectadas: "70"
+    tratamiento: "regla producto_en_catalogo (warn); la venta se conserva"
+  - problema: "ventas de un lote que vuelven a llegar idénticas en el lote siguiente"
+    ejemplo: "VTA-014864 en los lotes 1 y 2"
+    filas_afectadas: "235 venta_id repetidos, todos idénticos"
+    tratamiento: "deduplicación por venta_id en Silver"

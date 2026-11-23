@@ -1,0 +1,9 @@
+.databricks/
+.bundle/
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+.ipynb_checkpoints/
+# Los datos del curso no se versionan: se suben al volume de landing.
+datos/

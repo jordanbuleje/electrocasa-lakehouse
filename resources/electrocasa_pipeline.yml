@@ -1,0 +1,17 @@
+# Pipeline principal: Bronze (Auto Loader), Silver y Gold con Lakeflow Spark Declarative Pipelines.
+resources:
+  pipelines:
+    electrocasa_pipeline:
+      name: electrocasa_pipeline_${bundle.target}
+      catalog: ${var.catalog}
+      schema: silver                     # schema por defecto; el código usa nombres completos
+      serverless: true                   # sin cluster que administrar; se apaga al terminar
+      continuous: false                  # modo triggered: procesa lo pendiente y se detiene
+      channel: CURRENT
+      root_path: ../src/electrocasa      # permite `from utils import ...` en las transformaciones
+      libraries:
+        - glob:
+            include: ../src/electrocasa/transformations/**
+      configuration:
+        electrocasa.catalog: ${var.catalog}
+        electrocasa.tracking_table: ${var.catalog}.bronze.tracking_envios

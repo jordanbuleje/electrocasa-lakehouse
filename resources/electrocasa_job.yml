@@ -1,0 +1,80 @@
+# Job de orquestación:
+#   1. copy_into_bronze     (notebook)  Catálogo y Sucursales -> bronze con COPY INTO
+#   2. ingesta_tracking     (pipeline)  conector query-based de Lakeflow Connect -> bronze.tracking_envios
+#   3. pipeline_principal   (pipeline)  Bronze (Auto Loader), Silver y Gold
+#   4. validacion           (notebook)  conteos, rechazos por fuente y falla si Gold queda vacía
+#
+# En secuencia: el conector y el pipeline principal no corren a la vez.
+resources:
+  jobs:
+    electrocasa_job:
+      name: electrocasa_job_${bundle.target}
+      description: Orquestación del lakehouse ElectroCasa (ingesta, Medallion y validación).
+      max_concurrent_runs: 1             # una corrida a la vez: los lotes se procesan en orden
+
+      # Trigger por llegada de archivos: los lotes llegan sin fecha fija (mayo, agosto,
+      # octubre), así que un horario correría vacío casi siempre. Espera 2 minutos sin
+      # archivos nuevos antes de disparar, para tomar todas las fuentes del lote juntas.
+      trigger:
+        pause_status: ${var.job_trigger_pause_status}
+        file_arrival:
+          url: /Volumes/${var.catalog}/default/vol_landing/
+          wait_after_last_change_seconds: 120
+          min_time_between_triggers_seconds: 300
+
+      email_notifications:
+        on_failure:
+          - ${var.alert_email}
+        on_success:
+          - ${var.alert_email}
+        on_duration_warning_threshold_exceeded:
+          - ${var.alert_email}
+      health:
+        rules:
+          - metric: RUN_DURATION_SECONDS
+            op: GREATER_THAN
+            value: 3600                  # alerta si una corrida pasa de 1 hora
+
+      tasks:
+        - task_key: copy_into_bronze
+          description: COPY INTO idempotente de Catálogo y Sucursales.
+          notebook_task:
+            notebook_path: ../notebooks/01_copy_into_bronze.ipynb
+            base_parameters:
+              catalog: ${var.catalog}
+          max_retries: 2
+          min_retry_interval_millis: 60000
+          retry_on_timeout: true
+          timeout_seconds: 1800
+
+        - task_key: ingesta_tracking
+          description: Conector query-based de SQL Server (cursor fecha_modificacion, llave evento_id).
+          depends_on:
+            - task_key: copy_into_bronze
+          pipeline_task:
+            pipeline_id: ${var.tracking_pipeline_id}
+          max_retries: 2
+          min_retry_interval_millis: 120000
+          timeout_seconds: 3600
+
+        - task_key: pipeline_principal
+          description: Pipeline declarativo Bronze, Silver y Gold.
+          depends_on:
+            - task_key: ingesta_tracking
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.electrocasa_pipeline.id}
+            full_refresh: false
+          max_retries: 1
+          min_retry_interval_millis: 120000
+          timeout_seconds: 3600
+
+        - task_key: validacion
+          description: Conteos, rechazos por fuente y falla si alguna tabla de Gold queda vacía.
+          depends_on:
+            - task_key: pipeline_principal
+          notebook_task:
+            notebook_path: ../notebooks/02_validacion.ipynb
+            base_parameters:
+              catalog: ${var.catalog}
+          max_retries: 0                 # si falla es por datos, reintentar no lo corrige
+          timeout_seconds: 1800

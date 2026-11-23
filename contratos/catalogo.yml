@@ -1,0 +1,108 @@
+# Contrato de datos: Catálogo de productos
+# Coincide con src/electrocasa/transformations/silver/silver_catalogo_sucursales.py,
+# notebooks/01_copy_into_bronze.ipynb y REGLAS["catalogo"] de utils/calidad.py.
+
+fuente: catalogo
+version: 1
+ultima_actualizacion: "2026-11-22"
+responsable: "area_comercial (gestión de categorías)"
+llegada: "Un archivo JSON por snapshot (un arreglo de objetos), en /Volumes/<catalogo>/default/vol_landing/catalogo/"
+metodo_ingesta: >-
+  COPY INTO, en una tarea del job antes del pipeline. Cada archivo es el catálogo completo
+  y llegan muy pocos (2 snapshots en el período); COPY INTO es idempotente (no vuelve a
+  cargar un archivo ya cargado), corre en SQL y permite recargar un snapshot puntual con
+  'force' si hiciera falta. Opciones: multiLine (arreglo JSON) y primitivesAsString (Bronze
+  todo texto; sin esto falla con DELTA_FAILED_TO_MERGE_FIELDS porque activo llega como booleano).
+frecuencia_esperada: "cuando comercial publica un snapshot nuevo (en 2026: 1 de marzo y 1 de agosto)"
+tipo_entrega: "snapshot completo: cada archivo trae todo el catálogo vigente, no solo cambios"
+tabla_bronze: "<catalogo>.bronze.catalogo"
+tabla_silver: "<catalogo>.silver.catalogo"
+llave: "producto_id"
+historizacion: >-
+  No se historiza el precio: ninguna pregunta de negocio usa precios pasados (las ventas
+  traen su propio monto_total). Silver guarda un producto por fila con los datos del último
+  snapshot en que aparece (es lo que pide la pregunta 5 para la categoría). Bronze conserva
+  todos los snapshots, así que el historial sigue disponible. Los descontinuados
+  (activo = false) se conservan marcados: tienen ventas y reseñas históricas.
+
+columnas:
+  - nombre: producto_id
+    tipo: string
+    nulo: false
+  - nombre: nombre_producto
+    tipo: string
+    nulo: true
+  - nombre: categoria
+    tipo: string
+    nulo: false
+    valores_permitidos: ["linea_blanca", "cocina", "electronica", "climatizacion", "entretenimiento"]
+  - nombre: marca
+    tipo: string
+    nulo: true
+  - nombre: precio_lista
+    tipo: decimal(12,2)
+    nulo: true
+    regla: "numérico y mayor a 0 (se quita 'S/' y la coma de miles). Inválido -> advertencia, el producto se conserva"
+  - nombre: activo
+    tipo: boolean
+    nulo: false
+  - nombre: fecha_snapshot
+    tipo: date
+    nulo: false
+    regla: "derivada del nombre del archivo (catalogo_productos_2026-08-01.json)"
+
+reglas_de_calidad:
+  - nombre: precio_valido
+    condicion: "precio_lista IS NOT NULL AND precio_lista > 0"
+    politica: warn
+    destino_rechazos: "silver.cuarentena (fuente = 'catalogo', politica = 'warn'); el producto sí llega a Silver"
+    justificacion: >-
+      El precio de lista no participa en ninguna pregunta de negocio. Si se descartara el
+      producto, sus ventas y reseñas quedarían huérfanas y perderían la categoría (pregunta 5).
+  - nombre: categoria_conocida
+    condicion: "categoria IS NOT NULL"
+    politica: drop
+    destino_rechazos: "silver.cuarentena (politica = 'drop')"
+    justificacion: "Una categoría fuera del mapa indica un valor nuevo en la fuente; la pregunta 5 agrupa por categoría."
+  - nombre: producto_id_informado
+    condicion: "producto_id IS NOT NULL"
+    politica: drop
+    destino_rechazos: "silver.cuarentena"
+    justificacion: "Es la llave que referencian Ventas, Devoluciones y Reseñas."
+  - nombre: marca_informada
+    condicion: "marca IS NOT NULL"
+    politica: warn
+    destino_rechazos: "silver.cuarentena (politica = 'warn')"
+    justificacion: "Dato descriptivo; no afecta las preguntas."
+
+transformaciones_silver:
+  - "categoria: minúsculas, sin tildes, '_' y espacios unificados y mapa de 17 escrituras a 5 valores"
+  - "precio_lista: se quita 'S/' y la coma de miles ('S/ 1,299.90' -> 1299.90); try_cast a decimal(12,2)"
+  - "activo: texto -> boolean"
+  - "un producto por fila: row_number por producto_id ordenado por fecha_snapshot desc; dentro del mismo snapshot gana el precio válido y, entre válidos, el mayor"
+
+problemas_conocidos:
+  - problema: "categoria con 17 escrituras para 5 categorías"
+    ejemplo: "'Línea blanca', 'linea_blanca', 'LINEA BLANCA', 'Climatización', 'CLIMATIZACION'"
+    filas_afectadas: "todas (4.705 filas en los dos snapshots)"
+    tratamiento: "mapa CATEGORIAS"
+  - problema: "precio_lista como texto con moneda"
+    ejemplo: "'S/ 1,474.75'"
+    filas_afectadas: "49 en marzo, 41 en agosto"
+    tratamiento: "precio_decimal()"
+  - problema: "precio_lista negativo, cero o nulo"
+    ejemplo: "-2565.37, 0, null"
+    filas_afectadas: "marzo: 16 negativos, 13 cero, 12 nulos; agosto: 14 negativos, 13 cero, 24 nulos"
+    tratamiento: "regla precio_valido (warn)"
+  - problema: "marca nula"
+    ejemplo: "marca = null"
+    filas_afectadas: "46 en marzo, 48 en agosto"
+    tratamiento: "regla marca_informada (warn)"
+  - problema: "productos repetidos con precios distintos en el snapshot de marzo"
+    ejemplo: "PRD-00295 aparece dos veces"
+    filas_afectadas: "25 producto_id"
+    tratamiento: "deduplicación en Silver (precio válido y mayor)"
+  - problema: "productos descontinuados en el snapshot de agosto"
+    ejemplo: "activo = false"
+    filas_afectadas: "60"
+    tratamiento: "se conservan con activo = false"

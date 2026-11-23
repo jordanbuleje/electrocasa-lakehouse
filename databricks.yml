@@ -1,0 +1,52 @@
+# Declarative Automation Bundle del proyecto ElectroCasa.
+# El mismo código se despliega a dos targets que viven en el mismo workspace y se
+# diferencian por catálogo: electrocasa_dev y electrocasa_prod.
+#
+#   databricks bundle validate -t dev
+#   databricks bundle deploy   -t dev
+#   databricks bundle run      -t dev electrocasa_job
+#
+# Antes del primer deploy de cada target:
+#   1. correr notebooks/00_setup.ipynb con el catálogo del target;
+#   2. crear el conector de Tracking (Lakeflow Connect) y poner su pipeline id en
+#      tracking_pipeline_id del target;
+#   3. poner tu correo en alert_email (abajo, en cada target).
+
+bundle:
+  name: electrocasa-lakehouse
+
+include:
+  - resources/*.yml
+
+variables:
+  catalog:
+    description: Catálogo de Unity Catalog del target (bronze, silver, gold y el volume de landing).
+  alert_email:
+    description: Correo que recibe las alertas de fallo, éxito y demora del job.
+  tracking_pipeline_id:
+    description: ID del pipeline de ingesta del conector query-based de SQL Server (Lakeflow Connect) que escribe <catalog>.bronze.tracking_envios.
+  job_trigger_pause_status:
+    description: Estado del trigger por llegada de archivos (UNPAUSED o PAUSED).
+    default: UNPAUSED
+
+targets:
+  dev:
+    mode: development          # prefija los recursos con [dev <usuario>] y pausa los triggers
+    default: true
+    variables:
+      catalog: electrocasa_dev
+      alert_email: REEMPLAZAR_con_tu_correo@dominio.com
+      tracking_pipeline_id: REEMPLAZAR_con_id_del_pipeline_del_conector_dev
+
+  prod:
+    mode: production
+    workspace:
+      # Mismo workspace que dev; la separación es por catálogo.
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      catalog: electrocasa_prod
+      alert_email: REEMPLAZAR_con_tu_correo@dominio.com
+      tracking_pipeline_id: REEMPLAZAR_con_id_del_pipeline_del_conector_prod
+    permissions:
+      - group_name: electrocasa_ingenieria
+        level: CAN_MANAGE

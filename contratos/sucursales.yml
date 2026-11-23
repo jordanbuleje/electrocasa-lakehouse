@@ -1,0 +1,62 @@
+# Contrato de datos: Sucursales (referencia)
+# Coincide con src/electrocasa/transformations/silver/silver_catalogo_sucursales.py,
+# notebooks/01_copy_into_bronze.ipynb y REGLAS["sucursales"] de utils/calidad.py.
+
+fuente: sucursales
+version: 1
+ultima_actualizacion: "2026-11-22"
+responsable: "operaciones (expansión de tiendas)"
+llegada: "Un archivo CSV con encabezado en /Volumes/<catalogo>/default/vol_landing/sucursales/sucursales.csv"
+metodo_ingesta: >-
+  COPY INTO en una tarea del job. Es un solo archivo chico (40 filas) que casi no cambia:
+  COPY INTO lo carga una vez y en las corridas siguientes lo omite (idempotente). Si
+  operaciones publica una versión nueva del archivo con otro nombre, se carga y Silver se
+  queda con la última versión de cada sucursal.
+frecuencia_esperada: "esporádica: solo cuando se abre o cierra una sucursal"
+tabla_bronze: "<catalogo>.bronze.sucursales"
+tabla_silver: "<catalogo>.silver.sucursales"
+llave: "sucursal_id"
+
+columnas:
+  - nombre: sucursal_id
+    tipo: string
+    nulo: false
+  - nombre: nombre_sucursal
+    tipo: string
+    nulo: false
+  - nombre: distrito
+    tipo: string
+    nulo: true
+  - nombre: ciudad
+    tipo: string
+    nulo: false
+    regla: "casing uniforme (initcap)"
+  - nombre: region
+    tipo: string
+    nulo: false
+  - nombre: fecha_apertura
+    tipo: date
+    nulo: true
+
+reglas_de_calidad:
+  - nombre: sucursal_id_informado
+    condicion: "sucursal_id IS NOT NULL"
+    politica: drop
+    destino_rechazos: "silver.cuarentena (fuente = 'sucursales', politica = 'drop')"
+    justificacion: "Es la llave con la que Gold enriquece ventas, dotación y vendedores."
+  - nombre: region_informada
+    condicion: "region IS NOT NULL"
+    politica: warn
+    destino_rechazos: "silver.cuarentena (politica = 'warn')"
+    justificacion: "Dato descriptivo para reportes; la sucursal sigue siendo válida."
+
+transformaciones_silver:
+  - "ciudad: initcap(lower(trim(ciudad))) -> 'AREQUIPA' y 'PIURA' pasan a 'Arequipa' y 'Piura'"
+  - "fecha_apertura -> date"
+  - "una fila por sucursal_id (la última cargada)"
+
+problemas_conocidos:
+  - problema: "ciudad con casing inconsistente"
+    ejemplo: "'AREQUIPA' junto a 'Arequipa'; 'PIURA' junto a 'Piura'"
+    filas_afectadas: "2"
+    tratamiento: "initcap en Silver"
