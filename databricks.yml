@@ -35,8 +35,8 @@ targets:
     default: true
     variables:
       catalog: electrocasa_dev
-      alert_email: REEMPLAZAR_con_tu_correo@dominio.com
-      tracking_pipeline_id: REEMPLAZAR_con_id_del_pipeline_del_conector_dev
+      alert_email: jor14dan95@gmail.com
+      tracking_pipeline_id: e50279eb-8ce5-443a-b38e-8c15d8dd3e79
 
   prod:
     mode: production
