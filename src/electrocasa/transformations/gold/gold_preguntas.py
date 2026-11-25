@@ -260,3 +260,23 @@ def gold_despachos_courier():
         )
         .withColumn("pct_devueltos", F.round(100 * F.col("envios_devueltos") / F.col("envios_en_estado_final"), 2))
     )
+
+
+# ---------------------------------------------------------------------------
+# DIAGNÓSTICO TEMPORAL (borrar después de corregir)
+# ---------------------------------------------------------------------------
+
+@dp.materialized_view(
+    name=config.tabla("gold", "diag_ventas"),
+    table_properties=PROPS,
+)
+def gold_diag_ventas():
+    base = spark.read.table(config.tabla("silver", "ventas"))
+    return base.agg(
+        F.count("*").alias("total"),
+        F.count(F.when(_en_periodo("fecha_venta"), 1)).alias("en_periodo"),
+        F.count("sucursal_id").alias("con_sucursal"),
+        F.countDistinct("sucursal_id").alias("sucursales_distintas"),
+        F.min("fecha_venta").cast("string").alias("min_fecha"),
+        F.max("fecha_venta").cast("string").alias("max_fecha"),
+    )
