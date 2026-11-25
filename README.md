@@ -427,7 +427,7 @@ DESCRIBE HISTORY electrocasa_dev.bronze.tracking_envios;
 SELECT count(*) FROM electrocasa_dev.bronze.tracking_envios;   -- 15.139
 ```
 
-> **Completar:** la primera corrida deja un `MERGE` con 15.139 filas; la segunda, sin cambios en la tabla, no agrega ninguna versión. Captura → `docs/evidencia/tracking_dos_corridas.png`.
+El conector se ejecutó dos veces sobre `bronze.tracking_envios`. La primera corrida (MERGE, versión 2 del historial, a las 20:43) cargó las 15.139 filas de `dbo.TrackingEnvios`. La segunda, dentro de la ejecución del job de las 21:59 y sin cambios en la fuente, no generó ninguna versión nueva: el historial solo muestra `CREATE TABLE` (v0), `DLT SETUP` (v1) y `MERGE` (v2). La ingesta es incremental por el cursor `fecha_modificacion`. Captura: `docs/evidencia/tracking_dos_corridas.png`.
 
 ### Job y bundle
 
