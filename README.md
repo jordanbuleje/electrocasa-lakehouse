@@ -266,6 +266,7 @@ La tarea de validación ([`02_validacion.ipynb`](notebooks/02_validacion.ipynb))
 | Pipeline principal | Serverless, modo triggered | Corre unos minutos por lote y se apaga: no hay cluster encendido entre lotes. |
 | Conector de Tracking | Serverless (gestionado por Lakeflow Connect) | Lo administra Databricks. |
 | Tareas notebook del job | Serverless jobs compute | Tareas cortas y esporádicas: arrancan en segundos y no requieren configuración. Si el workspace no tiene serverless para jobs, se define un `job_cluster` (nunca un all-purpose). |
+El trigger por llegada de archivo no se pudo activar: Azure devuelve que `Microsoft.EventGrid` no está registrado en la suscripción, y el usuario de la demo no puede registrarlo desde el workspace. Mientras tanto, el job se ejecuta de forma manual con *Run now*. La configuración del trigger queda en `resources/electrocasa_job.yml`.
 
 ## 10. CI/CD con el bundle
 
