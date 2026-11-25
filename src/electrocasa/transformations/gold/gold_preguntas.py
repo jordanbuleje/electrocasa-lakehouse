@@ -280,9 +280,21 @@ def gold_diag_ventas():
             F.countDistinct("venta_id").alias("cantidad_ventas"),
         )
     )
-    return ventas.agg(
-        F.count("*").alias("grupos"),
-        F.sum("ventas").cast("string").alias("suma_ventas"),
-        F.min("mes").cast("string").alias("min_mes"),
-        F.max("mes").cast("string").alias("max_mes"),
+    devoluciones = (
+        spark.read.table(config.tabla("silver", "devoluciones"))
+        .filter(_en_periodo("fecha_devolucion"))
+        .groupBy("sucursal_id", _mes("fecha_devolucion").alias("mes"))
+        .agg(F.sum("monto_reembolso").alias("devoluciones"))
+    )
+    unido = ventas.join(devoluciones, ["sucursal_id", "mes"], "full_outer")
+    con_sucursales = unido.join(_sucursales(), "sucursal_id", "left")
+
+    def cuenta(df, etapa):
+        return df.agg(F.lit(etapa).alias("etapa"), F.count("*").alias("filas"))
+
+    return (
+        cuenta(ventas, "1_ventas_agrupadas")
+        .unionByName(cuenta(devoluciones, "2_devoluciones_agrupadas"))
+        .unionByName(cuenta(unido, "3_full_join"))
+        .unionByName(cuenta(con_sucursales, "4_con_sucursales"))
     )
