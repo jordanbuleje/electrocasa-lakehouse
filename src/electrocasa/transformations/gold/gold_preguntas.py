@@ -271,12 +271,18 @@ def gold_despachos_courier():
     table_properties=PROPS,
 )
 def gold_diag_ventas():
-    base = spark.read.table(config.tabla("silver", "ventas"))
-    return base.agg(
-        F.count("*").alias("total"),
-        F.count(F.when(_en_periodo("fecha_venta"), 1)).alias("en_periodo"),
-        F.count("sucursal_id").alias("con_sucursal"),
-        F.countDistinct("sucursal_id").alias("sucursales_distintas"),
-        F.min("fecha_venta").cast("string").alias("min_fecha"),
-        F.max("fecha_venta").cast("string").alias("max_fecha"),
+    ventas = (
+        spark.read.table(config.tabla("silver", "ventas"))
+        .filter(_en_periodo("fecha_venta"))
+        .groupBy("sucursal_id", _mes("fecha_venta").alias("mes"))
+        .agg(
+            F.sum("monto_total").alias("ventas"),
+            F.countDistinct("venta_id").alias("cantidad_ventas"),
+        )
+    )
+    return ventas.agg(
+        F.count("*").alias("grupos"),
+        F.sum("ventas").cast("string").alias("suma_ventas"),
+        F.min("mes").cast("string").alias("min_mes"),
+        F.max("mes").cast("string").alias("max_mes"),
     )
