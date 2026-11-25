@@ -60,7 +60,7 @@ def resenas_preparadas():
 def silver_resenas():
     return spark.read.table("resenas_preparadas").select(
         "resena_id", "producto_id", "cliente_id", "calificacion", "comentario",
-        "tags", "respuestas", "fecha_resena", "origen", "metadata", "metadata", "producto_en_catalogo",
+        "tags", "respuestas", "fecha_resena", "origen", "metadata", "producto_en_catalogo",
         F.col("_archivo_origen").alias("archivo_origen"),
         F.col("_lote").alias("lote"),
         F.col("_fecha_ingesta").alias("fecha_ingesta"),
