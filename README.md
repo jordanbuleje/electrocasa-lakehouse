@@ -134,7 +134,7 @@ SELECT tracking_id, lower(estado_entrega) AS estado, count(*) AS eventos
 FROM electrocasa_sqlserver.dbo.TrackingEnvios GROUP BY 1, 2 HAVING count(*) > 1;
 ```
 
-> **Completar:** pega el resultado y, si aparece una escritura de estado que no está en `ESTADOS_ENTREGA` (`src/electrocasa/utils/normalizacion.py`), agrégala ahí y en `contratos/tracking_envios.yml`. Las filas con estados desconocidos quedan en `silver.cuarentena` con su valor original.
+Tracking llega con 13 escrituras distintas de los estados (por ejemplo `PENDIENTE`, `Pendiente`, `En camino`, `EN_CAMINO`, `En transito`). Todas se mapean a los 4 estados del conjunto cerrado. En `silver.cuarentena` no hay ningún rechazo por `estado_conocido`.
 
 ## 5. Silver: limpieza, calidad y cuarentena
 
@@ -303,13 +303,13 @@ También se puede desplegar desde el panel **Deployments** del Git Folder. En un
 
 Se otorga `SELECT` sobre silver a `electrocasa_analistas` (no le corresponde), se muestra `SHOW GRANTS`, se revoca y se vuelve a mostrar.
 
-> **Completar:** captura de `SHOW GRANTS` antes y después → `docs/evidencia/revoke_antes.png`, `docs/evidencia/revoke_despues.png`.
+Antes del REVOKE, `electrocasa_analistas` tenía `SELECT` y `USE SCHEMA` sobre `silver` (captura `docs/evidencia/revoke_antes.png`). Después del REVOKE, `SHOW GRANTS` no devuelve filas para `silver` (captura `docs/evidencia/revoke_despues.png`). El grupo conserva su acceso a `gold`.
 
 ### Acceso de Auditoría
 
 El mismo notebook otorga a `electrocasa_auditoria` `USE CATALOG` sobre `system`, `USE SCHEMA` sobre `system.access` y `SELECT` sobre las tablas de auditoría y lineage, y consulta el lineage del catálogo del proyecto.
 
-> **Completar:** resultado de los GRANT. Si alguno falla por permisos sobre el catálogo `system`, pega aquí el error y la captura de la pestaña **Lineage** de Catalog Explorer de `gold.ventas_netas_sucursal_mes` como evidencia alternativa.
+Los `GRANT` sobre el catálogo `system` fallan con `PERMISSION_DENIED`: el usuario de la demo no es administrador de la cuenta y no tiene `MANAGE` sobre `system`. `system.access.table_lineage` no está disponible en el workspace (`TABLE_OR_VIEW_NOT_FOUND`). Como alternativa, la evidencia de linaje es la pestaña **Lineage** de Catalog Explorer para `gold.ventas_netas_sucursal_mes` (captura `docs/evidencia/lineage_gold.png`).
 
 ### Masking de `dni` y `salario`
 
@@ -317,7 +317,7 @@ El mismo notebook otorga a `electrocasa_auditoria` `USE CATALOG` sobre `system`,
 - La máscara se declara **en el pipeline**, con la cláusula `MASK` en el schema de `silver.empleados_eventos`, `silver.empleados` y `gold.empleados_vigentes` (no con un `ALTER TABLE` posterior).
 - El dueño del pipeline (quien despliega el bundle) es **miembro de `electrocasa_ingenieria`**. Por eso el refresh lee los valores reales y la tabla derivada `gold.empleados_vigentes` los conserva. Como analistas y auditoría leen gold, esa tabla vuelve a declarar la máscara.
 
-> **Completar:** capturas de [`05_verificacion_masking.ipynb`](notebooks/05_verificacion_masking.ipynb) como miembro de ingeniería (valores reales en `gold.empleados_vigentes`) y sin serlo (`*****123` y `NULL`).
+Las pruebas de masking se hicieron con un único usuario, miembro de `electrocasa_ingenieria`. Como ingeniería, `silver.empleados` y `gold.empleados_vigentes` muestran `dni` y `salario` reales (`docs/evidencia/masking_ingenieria.png`). El caso sin pertenencia al grupo (`*****123` y `NULL`) no se verificó, porque no hay un segundo usuario disponible y no se quiso quitar la membresía del dueño del pipeline. La máscara está declarada en el pipeline (cláusula `MASK`) y en `gold.empleados_vigentes`.
 
 `silver.cuarentena` guarda la fila original como JSON, incluidos `dni` y `salario` de Empleados. Por eso queda en silver, donde solo entra `electrocasa_ingenieria`.
 
@@ -329,7 +329,7 @@ El mismo notebook otorga a `electrocasa_auditoria` `USE CATALOG` sobre `system`,
 - `system.lakeflow.job_run_timeline` y `job_task_run_timeline`: duración y resultado de cada corrida y tarea.
 - `system.billing.usage`: DBUs por recurso del proyecto.
 
-> **Completar:** captura de la consulta de expectations y del historial de corridas. Si alguna tabla de sistema no está disponible, pega el error y usa el event log del pipeline y el historial de corridas de la UI.
+El event log del pipeline muestra las actualizaciones iniciadas por el job (`JOB_TASK`) y por ejecución manual (`USER_ACTION`) (`docs/evidencia/monitoreo_event_log.png`). Las métricas de expectations muestran, por ejemplo, 249 devoluciones rechazadas por `reembolso_valido` y 183 por `venta_existe` (`docs/evidencia/monitoreo_expectations.png`). `system.lakeflow` y `system.billing` no están disponibles (`INSUFFICIENT_PERMISSIONS`); el historial de corridas se toma de la UI del job (`docs/evidencia/job_historial.png`) y el compute se justifica en la sección 9.
 
 ## 13. Despliegue paso a paso
 
@@ -431,7 +431,7 @@ SELECT count(*) FROM electrocasa_dev.bronze.tracking_envios;   -- 15.139
 
 ### Job y bundle
 
-> **Completar:** captura de una corrida exitosa del job con las 4 tareas en verde (`docs/evidencia/job_ok.png`) y la salida de `databricks bundle deploy -t dev` o del panel Deployments (`docs/evidencia/bundle_deploy.png`).
+Job: la corrida `351722088970655` terminó con las 4 tareas en verde (`docs/evidencia/job_ok.png`). Bundle: `databricks bundle deploy -t dev`, ejecutado desde el panel Deployments del Git folder, terminó con éxito (`docs/evidencia/bundle_deploy.png`).
 
 ## 15. Antipatrones evitados
 
